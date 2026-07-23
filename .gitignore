@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Virtual environment
+venv/
+.venv/
+
+# Model cache
+models/
+resemble_enhance/model_repo/
+*.ckpt
+*.pth
+*.onnx
+
+# Dataset (auto-created on launch)
+dataset/
+
+# Audio (test data should not be committed)
+*.wav
+*.flac
+*.mp3
+*.ogg
+
+# Logs / runtime
+*.log
+.gradio/
+
+# IDE / OS
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store

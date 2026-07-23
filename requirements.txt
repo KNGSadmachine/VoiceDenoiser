@@ -1,0 +1,15 @@
+# PyTorch (GPU): install first with
+#   pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu121
+# then: pip install -r requirements.txt
+torch
+torchaudio
+deepfilternet
+gradio>=6
+huggingface_hub
+soundfile
+numpy
+# for vendored resemble_enhance (inference only, deepspeed stripped)
+matplotlib
+omegaconf
+scipy
+tabulate
