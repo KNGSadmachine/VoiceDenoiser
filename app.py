@@ -1,4 +1,7 @@
 """VoiceDenoiser — AI音声データセット一括ノイズ除去ツール"""
+import os
+import subprocess
+import sys
 import tempfile
 import traceback
 from pathlib import Path
@@ -265,6 +268,35 @@ def load_theme():
         return None
 
 
+def open_in_file_manager(path: str):
+    """指定フォルダをOS標準のファイルマネージャーで開く。"""
+    if not path or not path.strip():
+        raise gr.Error("開くフォルダのパスを指定してください。")
+
+    requested = Path(path).expanduser()
+    if requested.is_dir():
+        target = requested.resolve()
+        note = ""
+    elif not requested.exists() and requested.parent.is_dir():
+        # まだ作成されていない出力先は、作成予定の親フォルダを開く。
+        target = requested.parent.resolve()
+        note = f"（指定先が未作成のため親フォルダを開きました: {target}）"
+    else:
+        raise gr.Error(f"フォルダが見つかりません: {path}")
+
+    try:
+        if sys.platform == "darwin":
+            subprocess.Popen(["open", str(target)])
+        elif os.name == "nt":
+            os.startfile(str(target))
+        else:
+            subprocess.Popen(["xdg-open", str(target)])
+    except OSError as exc:
+        raise gr.Error(f"ファイルマネージャーを開けませんでした: {exc}") from exc
+
+    return f"フォルダを開きました: `{target}`{note}"
+
+
 def build_ui():
     with gr.Blocks(title="VoiceDenoiser", theme=load_theme()) as demo:
         gr.Markdown(
@@ -277,7 +309,10 @@ def build_ui():
             # 左列: 設定
             with gr.Column():
                 with gr.Group():
-                    gr.Markdown("### 設定")
+                    with gr.Row():
+                        gr.Markdown("### 設定")
+                        open_app_folder_btn = gr.Button("アプリフォルダを開く", scale=0)
+                    folder_open_status = gr.Markdown()
                     mode = gr.State("drop")
                     with gr.Tabs():
                         with gr.Tab("ファイルをドロップ") as tab_drop:
@@ -290,10 +325,18 @@ def build_ui():
                                 "指定フォルダ内の全音声を、フォルダ構造を保ったまま処理します。"
                                 "大量のファイルはこちらが高速です。"
                             )
-                            input_dir = gr.Textbox(label="入力フォルダ", value=str(DEFAULT_INPUT))
+                            with gr.Row():
+                                input_dir = gr.Textbox(
+                                    label="入力フォルダ", value=str(DEFAULT_INPUT), scale=4
+                                )
+                                open_input_folder_btn = gr.Button("フォルダを開く", scale=1)
                     tab_drop.select(lambda: "drop", None, mode)
                     tab_folder.select(lambda: "folder", None, mode)
-                    output_dir = gr.Textbox(label="出力フォルダ", value=str(DEFAULT_OUTPUT))
+                    with gr.Row():
+                        output_dir = gr.Textbox(
+                            label="出力フォルダ", value=str(DEFAULT_OUTPUT), scale=4
+                        )
+                        open_output_folder_btn = gr.Button("フォルダを開く", scale=1)
                     engine = gr.Dropdown(
                         choices=list(ENGINES), value=DEFAULT_ENGINE, label="エンジン",
                         info="試聴で聴き比べて選んでください。強力/最強は処理が遅くなります",
@@ -332,6 +375,11 @@ def build_ui():
         inputs = [mode, dropped, input_dir, output_dir, strength, engine, processing_mode, post_ops]
         preview_btn.click(preview, inputs, [audio_before, audio_after, preview_info])
         run_btn.click(run_batch, inputs, [result])
+        open_app_folder_btn.click(
+            lambda: open_in_file_manager(str(BASE_DIR)), None, folder_open_status
+        )
+        open_input_folder_btn.click(open_in_file_manager, input_dir, folder_open_status)
+        open_output_folder_btn.click(open_in_file_manager, output_dir, folder_open_status)
     return demo
 
 

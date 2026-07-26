@@ -51,6 +51,8 @@ run.bat          # Windows
 
 Your browser opens `http://127.0.0.1:7860`.
 
+Use **Open app folder** in the GUI to open the application directory in Finder, equivalent to `open .` on macOS. The **Open folder** buttons beside the input and output paths open those selected folders directly.
+
 1. Put audio files in `dataset/raw/` (or drop them directly onto the GUI, or point it at any other folder)
 2. For binaural audio, select **Binaural-preserving mode** in the processing mode setting
 3. Use the preview to compare before/after and pick an engine and strength

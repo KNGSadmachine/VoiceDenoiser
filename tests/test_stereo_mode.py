@@ -10,6 +10,14 @@ import app
 
 
 class StereoModeTests(unittest.TestCase):
+    def test_open_in_file_manager_uses_open_on_macos(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with patch("app.sys.platform", "darwin"), patch("app.subprocess.Popen") as launch:
+                status = app.open_in_file_manager(temp_dir)
+
+        launch.assert_called_once_with(["open", str(Path(temp_dir).resolve())])
+        self.assertIn("フォルダを開きました", status)
+
     def test_denoise_file_writes_two_channels_in_preserving_mode(self):
         audio = torch.tensor([
             [1.0, 2.0, 3.0, 4.0],
