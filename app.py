@@ -23,6 +23,12 @@ ENGINES = {
 }
 DEFAULT_ENGINE = next(iter(ENGINES))
 
+PROCESSING_MODES = {
+    "通常モード（既存）": False,
+    "バイノーラル保持モード（LRを別々に処理）": True,
+}
+DEFAULT_PROCESSING_MODE = next(iter(PROCESSING_MODES))
+
 NORMALIZE_LABEL = "ノーマライズ (-3dB)"
 TRIM_LABEL = "前後の無音カット"
 POST_OPS = [NORMALIZE_LABEL, TRIM_LABEL]
@@ -61,17 +67,39 @@ def _denoise_dfn(audio: torch.Tensor, sr: int, strength_db: float) -> torch.Tens
     return cleaned
 
 
-def _denoise_resemble(audio: torch.Tensor, sr: int, do_enhance: bool) -> torch.Tensor:
+def _denoise_resemble_channel(audio: torch.Tensor, sr: int, do_enhance: bool) -> torch.Tensor:
     from resemble_enhance.enhancer.inference import denoise, enhance
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    mono = audio.mean(0)  # Resemble Enhance はモノラル入力のみ
     fn = enhance if do_enhance else denoise
-    cleaned, out_sr = fn(mono, sr, device)
-    cleaned = cleaned.cpu().unsqueeze(0)
+    cleaned, out_sr = fn(audio, sr, device)
+    cleaned = cleaned.cpu()
     if out_sr != sr:
-        cleaned = torchaudio.functional.resample(cleaned, out_sr, sr)
+        cleaned = torchaudio.functional.resample(cleaned.unsqueeze(0), out_sr, sr).squeeze(0)
     return cleaned
+
+
+def _denoise_resemble(audio: torch.Tensor, sr: int, do_enhance: bool,
+                       preserve_stereo: bool = False) -> torch.Tensor:
+    """Resemble Enhanceは1chずつ処理し、必要ならチャンネル数を保持する。"""
+    if preserve_stereo and audio.shape[0] > 1:
+        # Resemble Enhance自体はモノラル入力のみ対応するため、L/Rを混ぜずに
+        # 同じ処理を各チャンネルへ適用する。これで空間情報を平均化しない。
+        cleaned_channels = [
+            _denoise_resemble_channel(channel, sr, do_enhance)
+            for channel in audio
+        ]
+        lengths = {channel.shape[-1] for channel in cleaned_channels}
+        if len(lengths) != 1:
+            raise RuntimeError(
+                "Resemble Enhanceの左右チャンネルで出力長が一致しません: "
+                f"{sorted(lengths)}"
+            )
+        return torch.stack(cleaned_channels, dim=0)
+
+    # 既存モードの挙動。Resemble Enhanceは左右を平均してモノラル化する。
+    mono = audio.mean(0)
+    return _denoise_resemble_channel(mono, sr, do_enhance).unsqueeze(0)
 
 
 def _normalize(audio: torch.Tensor, peak_db: float = NORMALIZE_PEAK_DB) -> torch.Tensor:
@@ -96,14 +124,19 @@ def _trim_silence(audio: torch.Tensor, sr: int,
 
 
 def denoise_file(in_path: Path, out_path: Path, strength_db: float,
-                 engine: str = "dfn", post_ops: list | None = None):
+                 engine: str = "dfn", post_ops: list | None = None,
+                 preserve_stereo: bool = False):
     audio, sr = torchaudio.load(str(in_path))
     if engine == "dfn":
         cleaned = _denoise_dfn(audio, sr, strength_db)
     elif engine == "re_denoise":
-        cleaned = _denoise_resemble(audio, sr, do_enhance=False)
+        cleaned = _denoise_resemble(
+            audio, sr, do_enhance=False, preserve_stereo=preserve_stereo
+        )
     elif engine == "re_enhance":
-        cleaned = _denoise_resemble(audio, sr, do_enhance=True)
+        cleaned = _denoise_resemble(
+            audio, sr, do_enhance=True, preserve_stereo=preserve_stereo
+        )
     else:
         raise ValueError(f"unknown engine: {engine}")
 
@@ -180,16 +213,21 @@ def resolve_jobs(mode: str, dropped: list | None, input_dir: str, output_dir: st
 
 
 def preview(mode: str, dropped: list | None, input_dir: str, output_dir: str,
-            strength_db: float, engine_label: str, post_ops: list):
+            strength_db: float, engine_label: str, processing_mode: str,
+            post_ops: list):
     """最初の1ファイルだけ処理して聴き比べ用に返す"""
     src, _ = resolve_jobs(mode, dropped, input_dir, output_dir)[0]
     tmp = Path(tempfile.gettempdir()) / "voicedenoiser_preview.wav"
-    denoise_file(src, tmp, strength_db, ENGINES[engine_label], post_ops)
+    denoise_file(
+        src, tmp, strength_db, ENGINES[engine_label], post_ops,
+        preserve_stereo=PROCESSING_MODES[processing_mode],
+    )
     return str(src), str(tmp), f"試聴ファイル: {src.name}"
 
 
 def run_batch(mode: str, dropped: list | None, input_dir: str, output_dir: str,
-              strength_db: float, engine_label: str, post_ops: list,
+              strength_db: float, engine_label: str, processing_mode: str,
+              post_ops: list,
               progress=gr.Progress()):
     jobs = resolve_jobs(mode, dropped, input_dir, output_dir)
     engine = ENGINES[engine_label]
@@ -204,7 +242,10 @@ def run_batch(mode: str, dropped: list | None, input_dir: str, output_dir: str,
             skipped += 1
             continue
         try:
-            denoise_file(src, out_file, strength_db, engine, post_ops)
+            denoise_file(
+                src, out_file, strength_db, engine, post_ops,
+                preserve_stereo=PROCESSING_MODES[processing_mode],
+            )
             done += 1
         except Exception:
             failed += 1
@@ -257,6 +298,14 @@ def build_ui():
                         choices=list(ENGINES), value=DEFAULT_ENGINE, label="エンジン",
                         info="試聴で聴き比べて選んでください。強力/最強は処理が遅くなります",
                     )
+                    processing_mode = gr.Radio(
+                        choices=list(PROCESSING_MODES), value=DEFAULT_PROCESSING_MODE,
+                        label="処理モード",
+                        info=(
+                            "バイノーラル保持モードではL/Rを混ぜずに別々に処理します。"
+                            "Resemble Enhanceでも2chのまま出力します。"
+                        ),
+                    )
                     strength = gr.Slider(
                         10, 100, value=100, step=5, label="ノイズ除去強度 (dB)",
                         info="標準エンジンのみ有効。100=最大除去。声がこもる場合は下げてください",
@@ -280,7 +329,7 @@ def build_ui():
                     gr.Markdown("### 結果")
                     result = gr.Textbox(label="結果", lines=10, show_label=False)
 
-        inputs = [mode, dropped, input_dir, output_dir, strength, engine, post_ops]
+        inputs = [mode, dropped, input_dir, output_dir, strength, engine, processing_mode, post_ops]
         preview_btn.click(preview, inputs, [audio_before, audio_after, preview_info])
         run_btn.click(run_batch, inputs, [result])
     return demo

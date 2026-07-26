@@ -18,6 +18,7 @@ Point it at your TTS / RVC / SoVITS training dataset and an AI model automatical
 - **Three engines** — Standard (DeepFilterNet: fast and safe) / Strong (Resemble Enhance: handles lip noise and other transients) / Max (with restoration). Compare them by ear with the preview feature
 - **Doesn't break your training data** — output keeps the original sample rate; denoising strength is adjustable
 - **Preview** — convert a single file and compare before/after prior to the full run
+- **Binaural-preserving mode** — denoise L/R independently without downmixing, and keep stereo output
 - **Post-processing** — optional normalization (-3 dB) and leading/trailing silence trimming
 - **Resume support** — already-processed files are skipped, so interrupted runs pick up where they left off
 - **GUI** — built with Gradio, runs in your browser. Uses the GPU automatically if available (CPU also works)
@@ -51,8 +52,13 @@ run.bat          # Windows
 Your browser opens `http://127.0.0.1:7860`.
 
 1. Put audio files in `dataset/raw/` (or drop them directly onto the GUI, or point it at any other folder)
-2. Use the preview to compare before/after and pick an engine and strength
-3. Hit "Start batch" and walk away → output goes to `dataset/clean/`
+2. For binaural audio, select **Binaural-preserving mode** in the processing mode setting
+3. Use the preview to compare before/after and pick an engine and strength
+4. Hit "Start batch" and walk away → output goes to `dataset/clean/`
+
+### Binaural audio
+
+In the default mode, Resemble Enhance averages L/R into mono before processing. To keep the spatial information, select **Binaural-preserving mode**. It denoises the left and right channels independently without mixing them, then saves a stereo file. DeepFilterNet also processes the channels separately in this mode.
 
 ### Choosing an engine
 
