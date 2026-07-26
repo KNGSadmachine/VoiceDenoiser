@@ -1,9 +1,11 @@
-# PyTorch (GPU): install first with
-#   pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu121
-# then: pip install -r requirements.txt
-torch
-torchaudio
-deepfilternet
+# DeepFilterNet 0.5.6 still imports torchaudio.backend.common, which was
+# removed in torchaudio 2.9. Keep this pair aligned and below that cutoff.
+# The same versions are available as macOS Apple Silicon wheels and in the
+# CUDA 12.1 index used by setup.sh.
+torch==2.5.1
+torchaudio==2.5.1
+sympy==1.13.1
+deepfilternet==0.5.6
 gradio>=6
 huggingface_hub
 soundfile

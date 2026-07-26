@@ -24,8 +24,8 @@ TTS・RVC・SoVITSなどの学習用データセットを入れると、AIモデ
 
 ## 動作環境
 
-- Python 3.10+
-- Windows / Linux
+- Python 3.10 または 3.11
+- Windows / Linux / macOS (Apple SiliconではCPU動作)
 - NVIDIA GPU 推奨(なくても動きますが、特に強力/最強エンジンはCPUだとかなり遅くなります)
 
 ## セットアップ
@@ -34,10 +34,12 @@ TTS・RVC・SoVITSなどの学習用データセットを入れると、AIモデ
 git clone https://github.com/ReineHonoka/VoiceDenoiser.git
 cd VoiceDenoiser
 setup.bat        # Windows
-# ./setup.sh     # Linux
+# ./setup.sh     # Linux / macOS
 ```
 
 venvの作成、PyTorch(GPUを自動判定してCUDA版/CPU版を選択)、依存パッケージのインストール、AIモデルのダウンロード(約700MB)まで自動で行います。
+
+モデルのダウンロードを後回しにする場合は `SKIP_MODEL_DOWNLOAD=1 ./setup.sh` としてください。アプリ本体は起動でき、モデルは必要時にダウンロードされます。
 
 ## 使い方
 

@@ -24,8 +24,8 @@ Point it at your TTS / RVC / SoVITS training dataset and an AI model automatical
 
 ## Requirements
 
-- Python 3.10+
-- Windows / Linux
+- Python 3.10 or 3.11
+- Windows / Linux / macOS (CPU on Apple Silicon)
 - NVIDIA GPU recommended (works without one, but the Strong/Max engines are much slower on CPU)
 
 ## Setup
@@ -34,10 +34,12 @@ Point it at your TTS / RVC / SoVITS training dataset and an AI model automatical
 git clone https://github.com/ReineHonoka/VoiceDenoiser.git
 cd VoiceDenoiser
 setup.bat        # Windows
-# ./setup.sh     # Linux
+# ./setup.sh     # Linux / macOS
 ```
 
 This creates the venv, installs PyTorch (auto-detects your GPU and picks the CUDA or CPU build), installs dependencies, and downloads the AI models (about 700 MB).
+
+To postpone the model download, run `SKIP_MODEL_DOWNLOAD=1 ./setup.sh`. The app can launch and download models when needed.
 
 ## Usage
 
