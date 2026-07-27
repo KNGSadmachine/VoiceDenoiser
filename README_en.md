@@ -5,29 +5,45 @@
 ![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)
 ![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue.svg)
 
-Batch noise removal tool for AI voice datasets.
+Automated editing that protects the localization, distance, and left/right differences of binaural audio.
 
-Point it at your TTS / RVC / SoVITS training dataset and an AI model automatically removes white noise and background noise from every file — just set the folders and walk away.
+**Phase 1: De-plosive → Mouth De-click** is now implemented. It detects and locally repairs plosives and short mouth clicks in raw two-channel recordings, then produces a 32-bit float WAV intermediate master and a processing report for manual repair.
 
-![screenshot](docs/screenshot.png)
+```text
+Source
+  ↓
+Phase 1: De-plosive → Mouth De-click  ← available
+  ↓
+Manual repair
+  ↓
+Phase 2: Noise Reduction → EQ → DeEsser
+  ↓
+Manual level automation → Loudness matching
+```
 
-## Features
+See [roadmap.md](roadmap.md) for the planned implementation order and quality gates.
 
-- **Batch processing** — recursively scans the input folder, preserving folder structure and file names in the output
-- **AI-based denoising** — unlike conventional noise gates, an AI model trained on voice removes everything that isn't voice
-- **Three engines** — Standard (DeepFilterNet: fast and safe) / Strong (Resemble Enhance: handles lip noise and other transients) / Max (with restoration). Compare them by ear with the preview feature
-- **Doesn't break your training data** — output keeps the original sample rate; denoising strength is adjustable
-- **Preview** — convert a single file and compare before/after prior to the full run
-- **Binaural-preserving mode** — denoise L/R independently without downmixing, and keep stereo output
-- **Post-processing** — optional normalization (-3 dB) and leading/trailing silence trimming
-- **Resume support** — already-processed files are skipped, so interrupted runs pick up where they left off
-- **GUI** — built with Gradio, runs in your browser. Uses the GPU automatically if available (CPU also works)
+## Phase 1 features
+
+- **Binaural 2-channel only** — never mixes L/R; a one-sided event is repaired only in that channel
+- **Fixed order** — De-plosive always runs before Mouth De-click
+- **Localized processing** — plosives receive event-local low-frequency attenuation; clicks receive short interpolation without changing sample count
+- **Conservative automation** — only strong candidates are repaired; ambiguous candidates are left unchanged and reported for review
+- **Spatial and timing invariants** — preserves sample rate, two channels, sample count, and L/R order
+- **Intermediate master** — writes 32-bit float WAV to avoid repeated quantization
+- **Processing report** — JSON includes event time, channel, confidence, correction, and before/after peak and RMS
+- **Safe resume** — skips output only when source content, settings, and processing version match
+- **Atomic output** — an interrupted write is never treated as a finished file
+- **Preview and batch processing** — compare one file, then process a directory while preserving its structure
+
+Phase 1 does not normalize, trim silence, reduce steady noise, EQ, or de-ess.
 
 ## Requirements
 
 - Python 3.10 or 3.11
-- Windows / Linux / macOS (CPU on Apple Silicon)
-- NVIDIA GPU recommended (works without one, but the Strong/Max engines are much slower on CPU)
+- Windows / Linux / macOS
+- Phase 1 runs on CPU
+- An NVIDIA GPU is recommended only for Legacy denoising
 
 ## Setup
 
@@ -38,41 +54,66 @@ setup.bat        # Windows
 # ./setup.sh     # Linux / macOS
 ```
 
-This creates the venv, installs PyTorch (auto-detects your GPU and picks the CUDA or CPU build), installs dependencies, and downloads the AI models (about 700 MB).
+The setup creates a venv and installs PyTorch, dependencies, and the AI models used by Legacy denoising.
 
-To postpone the model download, run `SKIP_MODEL_DOWNLOAD=1 ./setup.sh`. The app can launch and download models when needed.
+Use `SKIP_MODEL_DOWNLOAD=1 ./setup.sh` to postpone model downloads. Phase 1 itself does not use an AI model.
 
 ## Usage
 
 ```bash
 run.bat          # Windows
-# ./run.sh       # Linux
+# ./run.sh       # Linux / macOS
 ```
 
 Your browser opens `http://127.0.0.1:7860`.
 
-Use **Open app folder** in the GUI to open the application directory in Finder, equivalent to `open .` on macOS. The **Open folder** buttons beside the input and output paths open those selected folders directly.
+1. Put two-channel audio in `dataset/raw/`, drop files into the GUI, or choose another input folder
+2. Keep **Phase 1 — De-plosive → Mouth De-click** selected
+3. Convert one preview and compare before/after
+4. Start the batch
+5. Send the WAV files in `dataset/phase1/` to manual repair
 
-1. Put audio files in `dataset/raw/` (or drop them directly onto the GUI, or point it at any other folder)
-2. For binaural audio, select **Binaural-preserving mode** in the processing mode setting
-3. Use the preview to compare before/after and pick an engine and strength
-4. Hit "Start batch" and walk away → output goes to `dataset/clean/`
+The directory structure and base file names are preserved. Phase 1 output always uses the `.wav` extension.
 
-### Binaural audio
+### Reports
 
-In the default mode, Resemble Enhance averages L/R into mono before processing. To keep the spatial information, select **Binaural-preserving mode**. It denoises the left and right channels independently without mixing them, then saves a stereo file. DeepFilterNet also processes the channels separately in this mode.
+Each output gets a `.phase1.json` report beside it:
 
-### Choosing an engine
+```text
+dataset/phase1/scene/take.wav
+dataset/phase1/scene/take.phase1.json
+```
 
-| Engine | Speed | Best for | Notes |
-|---|---|---|---|
-| Standard (DeepFilterNet) | Fast | White noise, background noise | Least likely to alter the voice. Start here |
-| Strong (Resemble Enhance) | Slow | Lip noise and other transients | When Standard doesn't cut it |
-| Max (Resemble Enhance + restoration) | Slow | The above + audio restoration | May alter voice quality — always preview first |
+Summary fields:
 
-## Supported formats
+- `de_plosive`: automatically repaired plosives
+- `mouth_de_click`: automatically repaired mouth clicks
+- `review`: candidates left unchanged for human review
 
-wav / flac / mp3 / ogg (lossy mp3/ogg inputs are written out as wav)
+Each event records L/R, start and end times, confidence, and the action taken.
+
+## Input contract
+
+- Exactly two channels
+- At least 16 kHz
+- At least 50 ms
+- wav / flac / mp3 / ogg
+
+Phase 1 does not silently convert mono or multichannel input because that could change spatial intent. An incompatible file fails individually while the rest of a batch continues.
+
+## Legacy denoising
+
+The previous DeepFilterNet / Resemble Enhance workflow remains available as **Legacy — 従来のノイズ除去**. Expand **Legacyノイズ除去の設定** to choose its engine, strength, processing mode, and post-processing.
+
+Legacy is separate from Phase 1 and is never applied automatically to Phase 1 output.
+
+## Tests
+
+```bash
+./venv/bin/python -m unittest discover -s tests -v
+```
+
+Tests cover synthetic plosive/click repair, fixed step order, channel and sample-count invariants, untouched opposite channels, 32-bit float WAV output, sidecars, and resume identity.
 
 ## License
 
@@ -80,6 +121,6 @@ wav / flac / mp3 / ogg (lossy mp3/ogg inputs are written out as wav)
 
 ## Credits
 
-- Denoising model: [DeepFilterNet](https://github.com/Rikorose/DeepFilterNet) (MIT / Apache-2.0)
-- Denoising model: [Resemble Enhance](https://github.com/resemble-ai/resemble-enhance) (MIT) — inference code only, bundled in `resemble_enhance/` (deepspeed dependency removed for Windows support)
+- Legacy denoising model: [DeepFilterNet](https://github.com/Rikorose/DeepFilterNet) (MIT / Apache-2.0)
+- Legacy denoising model: [Resemble Enhance](https://github.com/resemble-ai/resemble-enhance) (MIT) — inference code bundled in `resemble_enhance/`
 - UI theme: [NoCrypt/miku](https://huggingface.co/spaces/NoCrypt/miku) (Apache-2.0)

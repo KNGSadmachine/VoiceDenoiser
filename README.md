@@ -5,29 +5,45 @@
 ![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)
 ![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue.svg)
 
-AI音声データセットのための一括ノイズ除去ツール
+バイノーラル音声の定位・距離感・左右差を守る自動編集ツールです。
 
-TTS・RVC・SoVITSなどの学習用データセットを入れると、AIモデルがホワイトノイズや環境音を自動で除去します。フォルダを指定して放置するだけで、面倒なデータセットのノイズ編集作業が不要になります。
+現在は **Phase 1: De-plosive → Mouth De-click** を実装済みです。録音直後の2ch素材から、破裂音と短い口クリックを検出して局所修復し、個別修復へ渡す32-bit float WAVと処理レポートを一括生成します。
 
-![screenshot](docs/screenshot.png)
+```text
+素材
+  ↓
+Phase 1: De-plosive → Mouth De-click  ← 実装済み
+  ↓
+個別修復（人手）
+  ↓
+Phase 2: ノイズリダクション → EQ → DeEsser
+  ↓
+手動の音量調整 → ラウドネス一致
+```
 
-## 特徴
+今後の実装順と品質基準は [roadmap.md](roadmap.md) を参照してください。
 
-- **一括処理** — 入力フォルダを再帰的にスキャンし、フォルダ構造・ファイル名を保ったまま出力
-- **AIノイズ除去** — 従来型のノイズゲートと違い、声の成分を学習したAIモデルが「声以外」を除去
-- **3段階のエンジン** — 標準(DeepFilterNet=速い・安全)/強力(Resemble Enhance=リップノイズ等にも効く)/最強(修復あり)を試聴で聴き比べて選択
-- **学習データを壊さない** — サンプリングレートは元ファイルを維持。除去強度も調整可能
-- **試聴機能** — 一括実行の前に1ファイルだけ変換して処理前後を聴き比べ
-- **バイノーラル保持モード** — L/Rを混ぜずに左右別々にノイズ除去し、ステレオのまま出力
-- **後処理** — ノーマライズ(-3dB)、前後の無音カットをオプションで実行
-- **レジューム対応** — 中断しても処理済みファイルはスキップして再開
-- **GUI** — Gradio製。ブラウザで操作、GPUがあれば自動で使用(CPUでも動作)
+## Phase 1の特徴
+
+- **バイノーラル2ch専用** — L/Rを混ぜず、片耳側だけのイベントもそのチャンネルだけ修復
+- **順序を固定** — 必ずDe-plosiveの後にMouth De-clickを実行
+- **局所処理** — 破裂音にはイベント区間だけの低域減衰、口クリックにはサンプル長を変えない短時間補間を適用
+- **保守的な自動判定** — 強い候補だけを自動修復し、曖昧な候補は音を変えず要確認として記録
+- **空間と時間を維持** — サンプルレート、2ch、サンプル数、L/Rの並びを維持
+- **中間マスター** — 複数工程での量子化劣化を避けるため32-bit float WAVで出力
+- **処理レポート** — イベント時刻、対象チャンネル、信頼度、補正量、処理前後のpeak/RMSをJSONへ保存
+- **安全なレジューム** — 入力内容・設定・処理バージョンが一致した成果物だけをスキップ
+- **原子的書き出し** — 中断途中のファイルを完成品として残さない
+- **試聴と一括処理** — 1ファイルの比較後、フォルダ構造を保ってまとめて処理
+
+Phase 1では、ノーマライズ、無音カット、ノイズリダクション、EQ、DeEsserを行いません。
 
 ## 動作環境
 
 - Python 3.10 または 3.11
-- Windows / Linux / macOS (Apple SiliconではCPU動作)
-- NVIDIA GPU 推奨(なくても動きますが、特に強力/最強エンジンはCPUだとかなり遅くなります)
+- Windows / Linux / macOS
+- Phase 1はCPUだけで動作
+- Legacyノイズ除去ではNVIDIA GPUを推奨
 
 ## セットアップ
 
@@ -38,41 +54,66 @@ setup.bat        # Windows
 # ./setup.sh     # Linux / macOS
 ```
 
-venvの作成、PyTorch(GPUを自動判定してCUDA版/CPU版を選択)、依存パッケージのインストール、AIモデルのダウンロード(約700MB)まで自動で行います。
+venvの作成、PyTorch、依存パッケージ、Legacy用AIモデルのダウンロードまで自動で行います。
 
-モデルのダウンロードを後回しにする場合は `SKIP_MODEL_DOWNLOAD=1 ./setup.sh` としてください。アプリ本体は起動でき、モデルは必要時にダウンロードされます。
+モデルのダウンロードを後回しにする場合は `SKIP_MODEL_DOWNLOAD=1 ./setup.sh` としてください。Phase 1自体はAIモデルを使用しません。
 
 ## 使い方
 
 ```bash
 run.bat          # Windows
-# ./run.sh       # Linux
+# ./run.sh       # Linux / macOS
 ```
 
 ブラウザで `http://127.0.0.1:7860` が開きます。
 
-GUIの「アプリフォルダを開く」ボタンで、`open .` と同じようにアプリのフォルダをFinderで開けます。入力・出力フォルダの横にある「フォルダを開く」ボタンから、指定中のフォルダを直接開くこともできます。
+1. 2ch音声を `dataset/raw/` に入れる。GUIへの直接ドロップや別フォルダの指定も可能
+2. 「処理フェーズ」で既定の「Phase 1 — De-plosive → Mouth De-click」を選ぶ
+3. 「試聴用に1ファイル変換」で処理前後を確認
+4. 「一括処理開始」を押す
+5. `dataset/phase1/` のWAVを個別修復工程へ渡す
 
-1. 音声ファイルを `dataset/raw/` に入れる(GUIに直接ドロップ、または別フォルダのパス指定でもOK)
-2. バイノーラル音源は「処理モード」で「バイノーラル保持モード（LRを別々に処理）」を選ぶ
-3. 試聴で処理前後を聴き比べて、エンジンと強度を選ぶ
-4. 「一括処理開始」を押して放置 → `dataset/clean/` に出力
+入力フォルダの構造とファイル名は出力側でも維持します。入力形式にかかわらず、Phase 1の出力拡張子は `.wav` です。
 
-### バイノーラル音源について
+### レポート
 
-通常モードでは、Resemble Enhanceが左右を平均してモノラル化してから処理します。左右の空間情報を残したい場合は、GUIの「処理モード」で「バイノーラル保持モード（LRを別々に処理）」を選択してください。このモードではL/Rを混ぜず、それぞれを独立してノイズ除去して2chのまま保存します。DeepFilterNetはこのモードでも左右を別チャンネルとして処理します。
+各出力の隣に同じベース名の `.phase1.json` を保存します。
 
-### エンジンの選び方
+```text
+dataset/phase1/scene/take.wav
+dataset/phase1/scene/take.phase1.json
+```
 
-| エンジン | 速度 | 向いているノイズ | 備考 |
-|---|---|---|---|
-| 標準 (DeepFilterNet) | 速い | ホワイトノイズ・環境音 | 声質が変わりにくい。まずはこれ |
-| 強力 (Resemble Enhance) | 遅い | リップノイズ等の突発音 | 標準で取れない場合に |
-| 最強 (Resemble Enhance 修復あり) | 遅い | 上記+音質補正 | 声質が変わるリスクあり。試聴必須 |
+主な集計値:
 
-## 対応フォーマット
+- `de_plosive`: 自動修復した破裂音
+- `mouth_de_click`: 自動修復した口クリック
+- `review`: 自動変更せず、人間の確認へ回した候補
 
-wav / flac / mp3 / ogg(非可逆のmp3/oggはwavで出力されます)
+各イベントにはL/R、開始・終了時刻、信頼度、処理内容を記録します。
+
+## 入力条件
+
+- Phase 1は2ch音声のみ対応
+- 16kHz以上
+- 50ms以上
+- wav / flac / mp3 / ogg
+
+monoや3ch以上を自動変換すると意図しない定位変化につながるため、Phase 1では変換せずファイル単位のエラーにします。バッチ処理は他の正常なファイルを続行します。
+
+## Legacyノイズ除去
+
+従来のDeepFilterNet / Resemble Enhanceによるノイズ除去は「Legacy — 従来のノイズ除去」として残しています。画面の「Legacyノイズ除去の設定」からエンジン、強度、処理モード、後処理を選択できます。
+
+LegacyはPhase 1とは別の処理です。Phase 1の出力へ自動的にLegacy処理を続けて適用することはありません。
+
+## テスト
+
+```bash
+./venv/bin/python -m unittest discover -s tests -v
+```
+
+合成した破裂音・口クリックの検出修復、処理順、2ch・サンプル数の保持、反対チャンネルの非変更、32-bit float WAV、sidecar、レジューム判定を検証します。
 
 ## License
 
@@ -80,6 +121,6 @@ wav / flac / mp3 / ogg(非可逆のmp3/oggはwavで出力されます)
 
 ## Credits
 
-- ノイズ除去モデル: [DeepFilterNet](https://github.com/Rikorose/DeepFilterNet) (MIT / Apache-2.0)
-- ノイズ除去モデル: [Resemble Enhance](https://github.com/resemble-ai/resemble-enhance) (MIT) — `resemble_enhance/` に推論部のみ同梱(deepspeed依存を除去してWindows対応)
+- Legacyノイズ除去モデル: [DeepFilterNet](https://github.com/Rikorose/DeepFilterNet) (MIT / Apache-2.0)
+- Legacyノイズ除去モデル: [Resemble Enhance](https://github.com/resemble-ai/resemble-enhance) (MIT) — `resemble_enhance/` に推論部のみ同梱
 - UIテーマ: [NoCrypt/miku](https://huggingface.co/spaces/NoCrypt/miku) (Apache-2.0)

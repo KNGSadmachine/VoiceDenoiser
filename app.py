@@ -11,13 +11,29 @@ import soundfile as sf
 import torch
 import torchaudio
 
+from phase1 import (
+    Phase1Config,
+    Phase1Error,
+    phase1_is_current,
+    process_phase1_file,
+)
+
 BASE_DIR = Path(__file__).parent
 DEFAULT_INPUT = BASE_DIR / "dataset" / "raw"
-DEFAULT_OUTPUT = BASE_DIR / "dataset" / "clean"
+DEFAULT_OUTPUT = BASE_DIR / "dataset" / "phase1"
+DEFAULT_LEGACY_OUTPUT = BASE_DIR / "dataset" / "clean"
 
 SUPPORTED_EXTS = {".wav", ".flac", ".mp3", ".ogg"}
 # 可逆フォーマットは元の形式のまま、非可逆(mp3/ogg)はwavで出力する
 LOSSY_EXTS = {".mp3", ".ogg"}
+
+PHASE1_WORKFLOW_LABEL = "Phase 1 — De-plosive → Mouth De-click"
+LEGACY_WORKFLOW_LABEL = "Legacy — 従来のノイズ除去"
+WORKFLOWS = {
+    PHASE1_WORKFLOW_LABEL: "phase1",
+    LEGACY_WORKFLOW_LABEL: "legacy",
+}
+DEFAULT_WORKFLOW = PHASE1_WORKFLOW_LABEL
 
 ENGINES = {
     "標準 (DeepFilterNet) — 速い・声質が変わりにくい。ホワイトノイズ向け": "dfn",
@@ -173,6 +189,34 @@ def output_path_for(in_file: Path, input_dir: Path, output_dir: Path) -> Path:
     return output_dir / rel
 
 
+def phase1_output_path_for(
+    in_file: Path, input_dir: Path, output_dir: Path
+) -> Path:
+    """Phase 1の中間マスターは常に32-bit float WAVとして出力する。"""
+    return (output_dir / in_file.relative_to(input_dir)).with_suffix(".wav")
+
+
+def validate_unique_outputs(jobs: list[tuple[Path, Path]]):
+    sources_by_output: dict[Path, list[Path]] = {}
+    for source, output in jobs:
+        sources_by_output.setdefault(output.resolve(), []).append(source)
+    collisions = {
+        output: sources
+        for output, sources in sources_by_output.items()
+        if len(sources) > 1
+    }
+    if collisions:
+        details = "; ".join(
+            f"{output.name} ← {', '.join(source.name for source in sources)}"
+            for output, sources in list(collisions.items())[:5]
+        )
+        raise gr.Error(
+            "複数の入力が同じ出力名になります。ファイル名またはフォルダ構造を"
+            f"変更してください: {details}"
+        )
+    return jobs
+
+
 def validate_dirs(input_dir: str, output_dir: str):
     if not input_dir or not output_dir:
         raise gr.Error("入力フォルダと出力フォルダを指定してください。")
@@ -184,7 +228,14 @@ def validate_dirs(input_dir: str, output_dir: str):
     return in_p, out_p
 
 
-def resolve_jobs(mode: str, dropped: list | None, input_dir: str, output_dir: str):
+def resolve_jobs(
+    mode: str,
+    dropped: list | None,
+    input_dir: str,
+    output_dir: str,
+    *,
+    phase1: bool = False,
+):
     """選択中のタブに応じて処理対象の (入力ファイル, 出力先) を返す。
     ドロップモードは出力フォルダ直下にフラットに出力する"""
     if mode == "drop":
@@ -206,13 +257,17 @@ def resolve_jobs(mode: str, dropped: list | None, input_dir: str, output_dir: st
                 "対応形式 (wav/flac/mp3/ogg) のファイルがドロップされていません。"
                 f"受け取ったファイル: {names}"
             )
-        return [(s, output_path_for(s, s.parent, out_p)) for s in srcs]
+        path_resolver = phase1_output_path_for if phase1 else output_path_for
+        jobs = [(s, path_resolver(s, s.parent, out_p)) for s in srcs]
+        return validate_unique_outputs(jobs)
 
     in_p, out_p = validate_dirs(input_dir, output_dir)
     files = collect_files(in_p, exclude_dir=out_p)
     if not files:
         raise gr.Error("入力フォルダに音声ファイルが見つかりません。")
-    return [(f, output_path_for(f, in_p, out_p)) for f in files]
+    path_resolver = phase1_output_path_for if phase1 else output_path_for
+    jobs = [(f, path_resolver(f, in_p, out_p)) for f in files]
+    return validate_unique_outputs(jobs)
 
 
 def preview(mode: str, dropped: list | None, input_dir: str, output_dir: str,
@@ -260,6 +315,144 @@ def run_batch(mode: str, dropped: list | None, input_dir: str, output_dir: str,
     return summary + ("\n" + "\n".join(logs) if logs else "")
 
 
+def preview_phase1(
+    mode: str,
+    dropped: list | None,
+    input_dir: str,
+    output_dir: str,
+):
+    """最初の2chファイルへPhase 1を実行し、処理前後を返す。"""
+    src, _ = resolve_jobs(
+        mode, dropped, input_dir, output_dir, phase1=True
+    )[0]
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix="voicedenoiser_phase1_preview-", suffix=".wav"
+    )
+    os.close(descriptor)
+    tmp = Path(temporary_name)
+    tmp.unlink(missing_ok=True)
+    try:
+        report = process_phase1_file(src, tmp, write_report=False)
+    except Phase1Error as exc:
+        raise gr.Error(str(exc)) from exc
+    summary = report["summary"]
+    info = (
+        f"試聴ファイル: {src.name}  \n"
+        f"De-plosive: {summary['de_plosive']}件 / "
+        f"Mouth De-click: {summary['mouth_de_click']}件 / "
+        f"要確認: {summary['review']}件"
+    )
+    return str(src), str(tmp), info
+
+
+def run_phase1_batch(
+    mode: str,
+    dropped: list | None,
+    input_dir: str,
+    output_dir: str,
+    progress=gr.Progress(),
+):
+    jobs = resolve_jobs(
+        mode, dropped, input_dir, output_dir, phase1=True
+    )
+    config = Phase1Config.conservative()
+    done = skipped = failed = 0
+    plosives = clicks = reviews = 0
+    logs = []
+
+    for src, out_file in progress.tqdm(jobs, desc="Phase 1処理中"):
+        if phase1_is_current(src, out_file, config):
+            skipped += 1
+            continue
+        try:
+            report = process_phase1_file(src, out_file, config)
+            summary = report["summary"]
+            plosives += summary["de_plosive"]
+            clicks += summary["mouth_de_click"]
+            reviews += summary["review"]
+            done += 1
+            logs.append(
+                f"完了: {src.name} → {out_file.name} "
+                f"(De-plosive {summary['de_plosive']} / "
+                f"De-click {summary['mouth_de_click']} / "
+                f"要確認 {summary['review']})"
+            )
+        except Exception:
+            failed += 1
+            logs.append(f"失敗: {src.name}")
+            logs.append(traceback.format_exc().splitlines()[-1])
+
+    summary = (
+        f"Phase 1完了: {done}件 / スキップ(同じ入力・設定): {skipped}件 / "
+        f"失敗: {failed}件 (全{len(jobs)}件)\n"
+        f"自動修復: De-plosive {plosives}件 / Mouth De-click {clicks}件 / "
+        f"要確認: {reviews}件"
+    )
+    if done:
+        summary += "\n各音声と同じ場所に `.phase1.json` レポートを保存しました。"
+    return summary + ("\n" + "\n".join(logs) if logs else "")
+
+
+def preview_workflow(
+    workflow_label: str,
+    mode: str,
+    dropped: list | None,
+    input_dir: str,
+    output_dir: str,
+    strength_db: float,
+    engine_label: str,
+    processing_mode: str,
+    post_ops: list,
+):
+    if WORKFLOWS[workflow_label] == "phase1":
+        return preview_phase1(mode, dropped, input_dir, output_dir)
+    return preview(
+        mode,
+        dropped,
+        input_dir,
+        output_dir,
+        strength_db,
+        engine_label,
+        processing_mode,
+        post_ops,
+    )
+
+
+def run_workflow(
+    workflow_label: str,
+    mode: str,
+    dropped: list | None,
+    input_dir: str,
+    output_dir: str,
+    strength_db: float,
+    engine_label: str,
+    processing_mode: str,
+    post_ops: list,
+    progress=gr.Progress(),
+):
+    if WORKFLOWS[workflow_label] == "phase1":
+        return run_phase1_batch(
+            mode, dropped, input_dir, output_dir, progress=progress
+        )
+    return run_batch(
+        mode,
+        dropped,
+        input_dir,
+        output_dir,
+        strength_db,
+        engine_label,
+        processing_mode,
+        post_ops,
+        progress=progress,
+    )
+
+
+def default_output_for_workflow(workflow_label: str) -> str:
+    if WORKFLOWS[workflow_label] == "phase1":
+        return str(DEFAULT_OUTPUT)
+    return str(DEFAULT_LEGACY_OUTPUT)
+
+
 def load_theme():
     # miku テーマ (NoCrypt/miku, Apache-2.0)。取得できない場合は標準テーマで起動
     try:
@@ -298,11 +491,10 @@ def open_in_file_manager(path: str):
 
 
 def build_ui():
-    with gr.Blocks(title="VoiceDenoiser", theme=load_theme()) as demo:
+    with gr.Blocks(title="VoiceDenoiser") as demo:
         gr.Markdown(
             "# VoiceDenoiser\n"
-            "AI音声データセットの一括ノイズ除去ツール。"
-            "フォルダを指定して放置するだけで、全ファイルのノイズを除去します。\n\n"
+            "バイノーラル音声の定位と左右差を守る自動編集ツール。\n\n"
             f"デバイス: **{'GPU (' + torch.cuda.get_device_name(0) + ')' if torch.cuda.is_available() else 'CPU'}**"
         )
         with gr.Row(equal_height=False):
@@ -313,6 +505,15 @@ def build_ui():
                         gr.Markdown("### 設定")
                         open_app_folder_btn = gr.Button("アプリフォルダを開く", scale=0)
                     folder_open_status = gr.Markdown()
+                    workflow = gr.Radio(
+                        choices=list(WORKFLOWS),
+                        value=DEFAULT_WORKFLOW,
+                        label="処理フェーズ",
+                        info=(
+                            "Phase 1は2ch専用で、De-plosive → Mouth De-clickの"
+                            "固定順に処理します。"
+                        ),
+                    )
                     mode = gr.State("drop")
                     with gr.Tabs():
                         with gr.Tab("ファイルをドロップ") as tab_drop:
@@ -337,25 +538,54 @@ def build_ui():
                             label="出力フォルダ", value=str(DEFAULT_OUTPUT), scale=4
                         )
                         open_output_folder_btn = gr.Button("フォルダを開く", scale=1)
-                    engine = gr.Dropdown(
-                        choices=list(ENGINES), value=DEFAULT_ENGINE, label="エンジン",
-                        info="試聴で聴き比べて選んでください。強力/最強は処理が遅くなります",
+                    gr.Markdown(
+                        "**Phase 1既定値:** 自動・保守的 / 32-bit float WAV出力 / "
+                        "ノーマライズ・無音カットなし"
                     )
-                    processing_mode = gr.Radio(
-                        choices=list(PROCESSING_MODES), value=DEFAULT_PROCESSING_MODE,
-                        label="処理モード",
-                        info=(
-                            "バイノーラル保持モードではL/Rを混ぜずに別々に処理します。"
-                            "Resemble Enhanceでも2chのまま出力します。"
-                        ),
-                    )
-                    strength = gr.Slider(
-                        10, 100, value=100, step=5, label="ノイズ除去強度 (dB)",
-                        info="標準エンジンのみ有効。100=最大除去。声がこもる場合は下げてください",
-                    )
-                    post_ops = gr.CheckboxGroup(
-                        choices=POST_OPS, value=[], label="後処理",
-                        info="ノイズ除去のあとに実行。無音カットは前後の無音を0.5秒だけ残して詰めます",
+                    with gr.Accordion("Legacyノイズ除去の設定", open=False):
+                        gr.Markdown(
+                            f"Legacyの既定出力先: `{DEFAULT_LEGACY_OUTPUT}`"
+                        )
+                        engine = gr.Dropdown(
+                            choices=list(ENGINES),
+                            value=DEFAULT_ENGINE,
+                            label="エンジン",
+                            info=(
+                                "試聴で聴き比べて選んでください。"
+                                "強力/最強は処理が遅くなります"
+                            ),
+                        )
+                        processing_mode = gr.Radio(
+                            choices=list(PROCESSING_MODES),
+                            value=DEFAULT_PROCESSING_MODE,
+                            label="処理モード",
+                            info=(
+                                "バイノーラル保持モードではL/Rを混ぜずに"
+                                "別々に処理します。"
+                            ),
+                        )
+                        strength = gr.Slider(
+                            10,
+                            100,
+                            value=100,
+                            step=5,
+                            label="ノイズ除去強度 (dB)",
+                            info=(
+                                "標準エンジンのみ有効。100=最大除去。"
+                                "声がこもる場合は下げてください"
+                            ),
+                        )
+                        post_ops = gr.CheckboxGroup(
+                            choices=POST_OPS,
+                            value=[],
+                            label="後処理",
+                            info=(
+                                "Legacyだけで使用します。Phase 1では"
+                                "ノーマライズと無音カットを実行しません"
+                            ),
+                        )
+                    workflow.change(
+                        default_output_for_workflow, workflow, output_dir
                     )
             # 右列: 試聴 → 一括処理 → 結果
             with gr.Column():
@@ -372,9 +602,21 @@ def build_ui():
                     gr.Markdown("### 結果")
                     result = gr.Textbox(label="結果", lines=10, show_label=False)
 
-        inputs = [mode, dropped, input_dir, output_dir, strength, engine, processing_mode, post_ops]
-        preview_btn.click(preview, inputs, [audio_before, audio_after, preview_info])
-        run_btn.click(run_batch, inputs, [result])
+        inputs = [
+            workflow,
+            mode,
+            dropped,
+            input_dir,
+            output_dir,
+            strength,
+            engine,
+            processing_mode,
+            post_ops,
+        ]
+        preview_btn.click(
+            preview_workflow, inputs, [audio_before, audio_after, preview_info]
+        )
+        run_btn.click(run_workflow, inputs, [result])
         open_app_folder_btn.click(
             lambda: open_in_file_manager(str(BASE_DIR)), None, folder_open_status
         )
@@ -386,4 +628,4 @@ def build_ui():
 if __name__ == "__main__":
     DEFAULT_INPUT.mkdir(parents=True, exist_ok=True)
     DEFAULT_OUTPUT.mkdir(parents=True, exist_ok=True)
-    build_ui().launch(inbrowser=True)
+    build_ui().launch(inbrowser=True, theme=load_theme())
